@@ -256,7 +256,7 @@ bool matchesColor(const PixelF& pixel, const Color& color, int tolerance8) {
 }
 
 float luminance(const PixelF& pixel) {
-  return 0.29891f * pixel.r + 0.58661f * pixel.g + 0.11448f * pixel.b;
+  return 0.299f * pixel.r + 0.587f * pixel.g + 0.114f * pixel.b;
 }
 
 void applyBilateral(const PixelF* src, PixelF* dst, int width, int height, int radius, float sigmaSpatial, float sigmaRange) {
@@ -317,6 +317,42 @@ void applyBilateral(const PixelF* src, PixelF* dst, int width, int height, int r
       out.a = center.a;
     }
   }
+}
+
+std::vector<float> channelMinMax(const std::vector<float>& src, int width, int height, int radius, bool useMax) {
+  radius = std::max(0, radius);
+  if (radius <= 0 || width <= 0 || height <= 0) {
+    return src;
+  }
+
+  std::vector<float> horizontal(src.size(), 0.0f);
+  std::vector<float> dst(src.size(), 0.0f);
+
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      float value = useMax ? 0.0f : 1.0f;
+      for (int k = -radius; k <= radius; ++k) {
+        const int sx = std::clamp(x + k, 0, width - 1);
+        const float sample = src[static_cast<std::size_t>(y) * width + sx];
+        value = useMax ? std::max(value, sample) : std::min(value, sample);
+      }
+      horizontal[static_cast<std::size_t>(y) * width + x] = value;
+    }
+  }
+
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      float value = useMax ? 0.0f : 1.0f;
+      for (int k = -radius; k <= radius; ++k) {
+        const int sy = std::clamp(y + k, 0, height - 1);
+        const float sample = horizontal[static_cast<std::size_t>(sy) * width + x];
+        value = useMax ? std::max(value, sample) : std::min(value, sample);
+      }
+      dst[static_cast<std::size_t>(y) * width + x] = value;
+    }
+  }
+
+  return dst;
 }
 
 void apply(const PixelF* src, PixelF* dst, int width, int height, const Parameters& params) {
@@ -587,43 +623,56 @@ void applyLineExtraction(const PixelF* src, PixelF* dst, int width, int height, 
   if (!src || !dst || width <= 0 || height <= 0) {
     return;
   }
-  const int inner = std::max(0, params.innerWidth);
-  const int outer = std::max(inner + 1, params.outerWidth);
-  std::vector<PixelF> filtered;
-  const PixelF* lineSrc = src;
-  if (params.bilateral) {
-    filtered.resize(static_cast<std::size_t>(width) * height);
-    applyBilateral(src, filtered.data(), width, height, params.bilateralRadius, params.bilateralSigmaSpatial, params.bilateralSigmaRange);
-    lineSrc = filtered.data();
+  const std::size_t count = static_cast<std::size_t>(width) * height;
+  std::vector<PixelF> normalized(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    normalized[i] = src[i];
+    if (quantize8(normalized[i].a) == 0) {
+      normalized[i].r = 1.0f;
+      normalized[i].g = 1.0f;
+      normalized[i].b = 1.0f;
+    }
   }
-  auto sampleLum = [&](int x, int y) {
-    x = std::clamp(x, 0, width - 1);
-    y = std::clamp(y, 0, height - 1);
-    return luminance(lineSrc[static_cast<std::size_t>(y) * width + x]);
-  };
+
+  std::vector<PixelF> filtered;
+  const PixelF* base = normalized.data();
+  if (params.bilateral) {
+    filtered.resize(count);
+    applyBilateral(normalized.data(), filtered.data(), width, height, params.bilateralRadius, params.bilateralSigmaSpatial, params.bilateralSigmaRange);
+    base = filtered.data();
+  }
+
+  std::vector<float> gray(count, 0.0f);
+  for (std::size_t i = 0; i < count; ++i) {
+    const PixelF& p = base[i];
+    const float mx = std::max({p.r, p.g, p.b});
+    const float mn = std::min({p.r, p.g, p.b});
+    gray[i] = std::clamp(p.a * (mx + mn) * 0.5f, 0.0f, 1.0f);
+  }
+
+  const int outer = std::clamp(params.outerWidth, 0, 100);
+  const int inner = std::clamp(params.innerWidth, 0, 100);
+  std::vector<float> red = gray;
+  std::vector<float> green = gray;
+  if (outer > 0) {
+    red = channelMinMax(gray, width, height, outer, true);
+  }
+  if (inner > 0) {
+    green = channelMinMax(gray, width, height, inner, false);
+  }
+
+  if (outer <= 0 && inner <= 0) {
+    for (std::size_t i = 0; i < count; ++i) {
+      const float value = gray[i];
+      dst[i] = PixelF {value, value, value, 1.0f};
+    }
+    return;
+  }
 
   for (int y = 0; y < height; ++y) {
     for (int x = 0; x < width; ++x) {
-      const float center = sampleLum(x, y);
-      float innerAvg = 0.0f;
-      float outerAvg = 0.0f;
-      int innerCount = 0;
-      int outerCount = 0;
-      for (int yy = y - outer; yy <= y + outer; ++yy) {
-        for (int xx = x - outer; xx <= x + outer; ++xx) {
-          const int d = std::max(std::abs(xx - x), std::abs(yy - y));
-          if (d <= inner) {
-            innerAvg += sampleLum(xx, yy);
-            ++innerCount;
-          } else if (d <= outer) {
-            outerAvg += sampleLum(xx, yy);
-            ++outerCount;
-          }
-        }
-      }
-      innerAvg = innerCount > 0 ? innerAvg / innerCount : center;
-      outerAvg = outerCount > 0 ? outerAvg / outerCount : center;
-      float edge = std::clamp(outerAvg - innerAvg, 0.0f, 1.0f);
+      const std::size_t index = static_cast<std::size_t>(y) * width + x;
+      float edge = std::clamp(std::abs(red[index] - green[index]), 0.0f, 1.0f);
       if (params.postLevel) {
         const float lo = std::clamp(params.levelLow, 0.0f, 1.0f);
         const float hi = std::max(lo + 0.0001f, std::clamp(params.levelHigh, 0.0f, 1.0f));
@@ -637,7 +686,7 @@ void applyLineExtraction(const PixelF* src, PixelF* dst, int width, int height, 
         line.b = base.b * (1.0f - edge) + params.color.b * edge;
         line.a = base.a;
       }
-      dst[static_cast<std::size_t>(y) * width + x] = line;
+      dst[index] = line;
     }
   }
 }
@@ -710,6 +759,9 @@ struct PixelTraits<ThinPixel> {
 #include "ThinPattern.inc"
 
 ThinPixel toThinPixel(const PixelF& pixel) {
+  if (quantize8(pixel.a) == 0) {
+    return {0.0f, 1.0f, 1.0f, 1.0f};
+  }
   return {pixel.a, pixel.r, pixel.g, pixel.b};
 }
 
@@ -745,8 +797,35 @@ void applyThin(const PixelF* src, PixelF* dst, int width, int height, const Thin
     return;
   }
   std::copy(src, src + static_cast<std::size_t>(width) * height, dst);
-  const int iterations = std::clamp(params.thinValue, 0, 20);
-  if (iterations <= 0 || params.targetColorCount <= 0) {
+  const int iterations = std::clamp(params.thinValue, 0, 16);
+  if (iterations <= 0) {
+    return;
+  }
+
+  std::array<Color, 4> enabledColors {};
+  int enabledColorCount = 0;
+  for (const TargetColor& target : params.targets) {
+    if (!target.enabled) {
+      continue;
+    }
+    const auto r = quantize8(target.color.r);
+    const auto g = quantize8(target.color.g);
+    const auto b = quantize8(target.color.b);
+    bool duplicate = false;
+    for (int i = 0; i < enabledColorCount; ++i) {
+      duplicate = quantize8(enabledColors[static_cast<std::size_t>(i)].r) == r &&
+                  quantize8(enabledColors[static_cast<std::size_t>(i)].g) == g &&
+                  quantize8(enabledColors[static_cast<std::size_t>(i)].b) == b;
+      if (duplicate) {
+        break;
+      }
+    }
+    if (!duplicate && enabledColorCount < static_cast<int>(enabledColors.size())) {
+      enabledColors[static_cast<std::size_t>(enabledColorCount)] = target.color;
+      ++enabledColorCount;
+    }
+  }
+  if (enabledColorCount <= 0) {
     return;
   }
 
@@ -756,9 +835,9 @@ void applyThin(const PixelF* src, PixelF* dst, int width, int height, const Thin
   }
 
   ThinInfo ti;
-  ti.target_color_count = std::clamp(params.targetColorCount, 0, 8);
+  ti.target_color_count = enabledColorCount;
   for (int i = 0; i < ti.target_color_count; ++i) {
-    ti.color8[i] = toThinTarget(params.targetColors[static_cast<std::size_t>(i)]);
+    ti.color8[i] = toThinTarget(enabledColors[static_cast<std::size_t>(i)]);
   }
   ti.level = std::clamp(static_cast<int>(std::lround(params.targetLevel * 255.0f)), 0, 255);
   ti.w = width;

@@ -743,7 +743,7 @@ inline typename PixelTraits<PixelType>::BakType getPat(typename PixelTraits<Pixe
             }
             return ret;
         }
-        else if (pat == 0xD6) {
+        else if (pat == 0xF8) {
             if (getData<PixelType>(ti, -1, 0) == true) {
                 ret.drawFlag = true;
                 ret.color = table[4];
@@ -906,7 +906,7 @@ inline typename PixelTraits<PixelType>::BakType getPat(typename PixelTraits<Pixe
             }
             return ret;
         }
-        else if (pat == 0xC8) {
+        else if (pat == 0x2A) {
             if (getData<PixelType>(ti, 0, -1) == true) {
                 ret.drawFlag = true;
                 ret.color = minColor<PixelType>(table[3], table[6]);
@@ -974,4 +974,3 @@ inline typename PixelTraits<PixelType>::BakType getPat(typename PixelTraits<Pixe
     }
     return ret;
 }
-

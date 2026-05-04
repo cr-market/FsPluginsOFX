@@ -17,6 +17,7 @@ namespace {
 using namespace selective_color_blur;
 
 constexpr int kTargetCount = 8;
+constexpr int kThinColorCount = 4;
 constexpr int kColorSwitchCount = 32;
 constexpr const char* kPluginGrouping = "F's Plugins OFX";
 
@@ -45,8 +46,8 @@ constexpr EffectSpec kSelectColor {EffectKind::SelectColor, "com.codex.fsplugins
 constexpr EffectSpec kColorSwitch {EffectKind::ColorSwitch, "com.codex.fsplugins.ColorSwitch", "FS-ColorSwitch", 1, 0};
 constexpr EffectSpec kEdgeLine {EffectKind::EdgeLine, "com.codex.fsplugins.EdgeLine", "FS-EdgeLine", 1, 0};
 constexpr EffectSpec kRimFill {EffectKind::RimFill, "com.codex.fsplugins.RimFill", "FS-RimFill", 1, 0};
-constexpr EffectSpec kLineExtraction {EffectKind::LineExtraction, "com.codex.fsplugins.LineExtraction", "FS-LineExtraction", 1, 0};
-constexpr EffectSpec kThin {EffectKind::Thin, "com.codex.fsplugins.Thin", "FS-Thin", 1, 0};
+constexpr EffectSpec kLineExtraction {EffectKind::LineExtraction, "com.codex.fsplugins.LineExtraction", "FS-LineExtraction", 1, 2};
+constexpr EffectSpec kThin {EffectKind::Thin, "com.codex.fsplugins.Thin", "FS-Thin", 1, 2};
 
 const std::array<Color, kTargetCount> kDefaultTargetColors = {{
     {1.0f, 0.0f, 0.0f, 1.0f},
@@ -101,8 +102,12 @@ std::string colorSwitchNewName(int index) {
   return "switch" + std::to_string(index) + "New";
 }
 
-std::string thinTargetColorName(int index) {
-  return "thinTarget" + std::to_string(index) + "Color";
+std::string thinColorEnabledName(int index) {
+  return "thinEnabledColor" + std::to_string(index + 1);
+}
+
+std::string thinColorName(int index) {
+  return "thinColor" + std::to_string(index + 1);
 }
 
 Color getColor(OFX::RGBAParam* param, double time) {
@@ -367,16 +372,22 @@ class FsPlugin final : public OFX::ImageEffect {
         blend_ = this->fetchBooleanParam("blend");
         break;
       case EffectKind::Thin:
-        thinTargetColorCount_ = this->fetchChoiceParam("thinTargetColorCount");
-        thinTargetLevel_ = this->fetchDoubleParam("thinTargetLevel");
-        for (int i = 0; i < kTargetCount; ++i) {
-          thinTargetColors_[static_cast<std::size_t>(i)] = this->fetchRGBAParam(thinTargetColorName(i));
-        }
         thinValue_ = this->fetchIntParam("thinValue");
+        for (int i = 0; i < kThinColorCount; ++i) {
+          thinColorEnabled_[static_cast<std::size_t>(i)] = this->fetchBooleanParam(thinColorEnabledName(i));
+          thinColors_[static_cast<std::size_t>(i)] = this->fetchRGBAParam(thinColorName(i));
+        }
+        thinTargetLevel_ = this->fetchDoubleParam("thinLevel");
         ignoreWhite_ = this->fetchBooleanParam("ignoreWhite");
         ignoreTransparent_ = this->fetchBooleanParam("ignoreTransparent");
         refineEdges_ = this->fetchBooleanParam("refineEdges");
         break;
+    }
+  }
+
+  void getClipPreferences(OFX::ClipPreferencesSetter& clipPreferences) override {
+    if (kind_ == EffectKind::LineExtraction) {
+      clipPreferences.setOutputPremultiplication(OFX::eImageUnPreMultiplied);
     }
   }
 
@@ -435,6 +446,17 @@ class FsPlugin final : public OFX::ImageEffect {
       identity = width_->getValueAtTime(args.time) <= 0;
     } else if (kind_ == EffectKind::EdgeLine) {
       identity = length_->getValueAtTime(args.time) <= 0;
+    } else if (kind_ == EffectKind::Thin) {
+      identity = thinValue_->getValueAtTime(args.time) <= 0;
+      if (!identity) {
+        identity = true;
+        for (OFX::BooleanParam* param : thinColorEnabled_) {
+          if (param && param->getValueAtTime(args.time)) {
+            identity = false;
+            break;
+          }
+        }
+      }
     }
     if (identity) {
       identityClip = srcClip_;
@@ -559,14 +581,13 @@ class FsPlugin final : public OFX::ImageEffect {
       }
       case EffectKind::Thin: {
         ThinParams params;
-        int colorCountChoice = 0;
-        thinTargetColorCount_->getValueAtTime(time, colorCountChoice);
-        params.targetColorCount = colorCountChoice + 1;
-        params.targetLevel = static_cast<float>(thinTargetLevel_->getValueAtTime(time));
-        for (int i = 0; i < kTargetCount; ++i) {
-          params.targetColors[static_cast<std::size_t>(i)] = getColor(thinTargetColors_[static_cast<std::size_t>(i)], time);
-        }
         params.thinValue = thinValue_->getValueAtTime(time);
+        for (int i = 0; i < kThinColorCount; ++i) {
+          TargetColor& target = params.targets[static_cast<std::size_t>(i)];
+          target.enabled = thinColorEnabled_[static_cast<std::size_t>(i)]->getValueAtTime(time);
+          target.color = getColor(thinColors_[static_cast<std::size_t>(i)], time);
+        }
+        params.targetLevel = static_cast<float>(thinTargetLevel_->getValueAtTime(time) / 100.0);
         params.ignoreWhite = ignoreWhite_->getValueAtTime(time);
         params.ignoreTransparent = ignoreTransparent_->getValueAtTime(time);
         params.refineEdges = refineEdges_->getValueAtTime(time);
@@ -606,7 +627,6 @@ class FsPlugin final : public OFX::ImageEffect {
   OFX::DoubleParam* levelLow_ = nullptr;
   OFX::DoubleParam* levelHigh_ = nullptr;
   OFX::BooleanParam* blend_ = nullptr;
-  OFX::ChoiceParam* thinTargetColorCount_ = nullptr;
   OFX::DoubleParam* thinTargetLevel_ = nullptr;
   OFX::IntParam* thinValue_ = nullptr;
   OFX::BooleanParam* ignoreWhite_ = nullptr;
@@ -615,7 +635,8 @@ class FsPlugin final : public OFX::ImageEffect {
 
   std::array<OFX::BooleanParam*, kTargetCount> targetEnabled_{};
   std::array<OFX::RGBAParam*, kTargetCount> targetColors_{};
-  std::array<OFX::RGBAParam*, kTargetCount> thinTargetColors_{};
+  std::array<OFX::BooleanParam*, kThinColorCount> thinColorEnabled_{};
+  std::array<OFX::RGBAParam*, kThinColorCount> thinColors_{};
   std::array<OFX::BooleanParam*, kColorSwitchCount> switchEnabled_{};
   std::array<OFX::RGBAParam*, kColorSwitchCount> switchOld_{};
   std::array<OFX::RGBAParam*, kColorSwitchCount> switchNew_{};
@@ -680,19 +701,23 @@ void defineParams(OFX::ImageEffectDescriptor& desc, EffectKind kind) {
       defineBool(desc, *page, "blend", "Blend with Original", false);
       break;
     case EffectKind::Thin: {
-      defineChoice(desc, *page, "thinTargetColorCount", "Inking Color Count", 0, {"1", "2", "3", "4", "5", "6", "7", "8"});
-      defineDouble(desc, *page, "thinTargetLevel", "Range", 0.0, 0.0, 10.0);
-      OFX::GroupParamDescriptor* group = desc.defineGroupParam("thinTargetColors");
-      group->setLabels("Inking Lines", "Inking Lines", "Inking Lines");
-      page->addChild(*group);
-      for (int i = 0; i < kTargetCount; ++i) {
-        const float v = static_cast<float>(i * 30) / 255.0f;
-        defineColor(desc, *page, thinTargetColorName(i), "Target" + std::to_string(i + 1), {v, v, v, 1.0f}, group);
+      defineInt(desc, *page, "thinValue", "ThinValue", 0, 0, 16, 4);
+      const std::array<Color, kThinColorCount> defaults {{
+          {5.0f / 255.0f, 5.0f / 255.0f, 5.0f / 255.0f, 1.0f},
+          {10.0f / 255.0f, 10.0f / 255.0f, 10.0f / 255.0f, 1.0f},
+          {1.0f, 0.0f, 0.0f, 1.0f},
+          {0.0f, 1.0f, 0.0f, 1.0f},
+      }};
+      for (int i = 0; i < kThinColorCount; ++i) {
+        defineBool(desc, *page, thinColorEnabledName(i), "EnabledColor" + std::to_string(i + 1), i == 0);
+        defineColor(desc, *page, thinColorName(i), "Color" + std::to_string(i + 1), defaults[static_cast<std::size_t>(i)]);
       }
-      defineInt(desc, *page, "thinValue", "ThinValue", 0, 0, 20, 10);
-      defineBool(desc, *page, "ignoreWhite", "Ignore White", false);
-      defineBool(desc, *page, "ignoreTransparent", "Ignore Transparent", false);
-      defineBool(desc, *page, "refineEdges", "Refine Edges", false);
+      OFX::DoubleParamDescriptor* level = defineDouble(desc, *page, "thinLevel", "level", 0.0, 0.0, 100.0);
+      level->setDisplayRange(0.0, 10.0);
+      level->setIncrement(0.1);
+      defineBool(desc, *page, "ignoreWhite", "NoWhite", false);
+      defineBool(desc, *page, "ignoreTransparent", "NoAlphaZero", false);
+      defineBool(desc, *page, "refineEdges", "EdgeFilter", false);
       break;
     }
   }

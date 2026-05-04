@@ -11,6 +11,13 @@
   ranges to 0-100 so users can match After Effects settings directly.
 - Added `FS-Thin` as a CPU OFX port based on the NF version's target color,
   thinning controls, and pattern thinning passes.
+- Matched `FS-Thin` to the older F's After Effects UI: `ThinValue`,
+  `EnabledColor1-4`, `Color1-4`, `level`, `NoWhite`, `NoAlphaZero`, and
+  `EdgeFilter`.
+- Adjusted `FS-Thin` to preserve older F's thinning pattern behavior and avoid
+  treating transparent black host pixels as target line pixels.
+- Adjusted `FS-LineExtraction` to use NF-style channel min/max sampling and to
+  normalize fully transparent pixels before bilateral processing.
 - Matched several existing plugin defaults/ranges to their After Effects
   versions: `FS-ColorSwitch`, `FS-RimFill`, `FS-MainLineRepaint`, and
   `FS-EdgeLine`.

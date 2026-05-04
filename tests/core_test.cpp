@@ -115,8 +115,8 @@ int main() {
       {0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f},
   };
   selective_color_blur::ThinParams thin;
-  thin.targetColorCount = 1;
-  thin.targetColors[0] = {0.0f, 0.0f, 0.0f, 1.0f};
+  thin.targets[0].enabled = true;
+  thin.targets[0].color = {0.0f, 0.0f, 0.0f, 1.0f};
   thin.thinValue = 1;
   selective_color_blur::applyThin(thinSrc.data(), dst.data(), 3, 1, thin);
   assert(dst[1].r > 0.5f);

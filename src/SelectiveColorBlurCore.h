@@ -106,9 +106,8 @@ struct LineExtractionParams {
 };
 
 struct ThinParams {
-  int targetColorCount = 1;
   float targetLevel = 0.0f;
-  std::array<Color, 8> targetColors;
+  std::array<TargetColor, 4> targets;
   int thinValue = 0;
   bool ignoreWhite = false;
   bool ignoreTransparent = false;
