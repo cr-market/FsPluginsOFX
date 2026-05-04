@@ -39,6 +39,9 @@ $(BUILD_DIR):
 $(BUILD_DIR)/%.o: src/%.cpp | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+$(CORE_OBJ): src/SelectiveColorBlurCore.h src/ThinPattern.inc
+$(PLUGIN_OBJ): src/SelectiveColorBlurCore.h
+
 $(BUILD_DIR)/ofxs_%.o: $(OPENFX_ROOT)/Support/Library/%.cpp | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 

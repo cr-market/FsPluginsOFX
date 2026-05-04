@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -27,6 +28,7 @@ enum class EffectKind {
   EdgeLine,
   RimFill,
   LineExtraction,
+  Thin,
 };
 
 struct EffectSpec {
@@ -44,6 +46,7 @@ constexpr EffectSpec kColorSwitch {EffectKind::ColorSwitch, "com.codex.fsplugins
 constexpr EffectSpec kEdgeLine {EffectKind::EdgeLine, "com.codex.fsplugins.EdgeLine", "FS-EdgeLine", 1, 0};
 constexpr EffectSpec kRimFill {EffectKind::RimFill, "com.codex.fsplugins.RimFill", "FS-RimFill", 1, 0};
 constexpr EffectSpec kLineExtraction {EffectKind::LineExtraction, "com.codex.fsplugins.LineExtraction", "FS-LineExtraction", 1, 0};
+constexpr EffectSpec kThin {EffectKind::Thin, "com.codex.fsplugins.Thin", "FS-Thin", 1, 0};
 
 const std::array<Color, kTargetCount> kDefaultTargetColors = {{
     {1.0f, 0.0f, 0.0f, 1.0f},
@@ -55,6 +58,28 @@ const std::array<Color, kTargetCount> kDefaultTargetColors = {{
     {0.5f, 0.5f, 0.5f, 1.0f},
     {0.875f, 0.875f, 0.875f, 1.0f},
 }};
+
+const std::array<Color, kTargetCount> kColorSwitchBaseColors = {{
+    {1.0f, 0.0f, 0.0f, 1.0f},
+    {0.0f, 1.0f, 0.0f, 1.0f},
+    {0.0f, 0.0f, 1.0f, 1.0f},
+    {0.0f, 1.0f, 1.0f, 1.0f},
+    {1.0f, 0.0f, 1.0f, 1.0f},
+    {1.0f, 1.0f, 0.0f, 1.0f},
+    {1.0f, 1.0f, 1.0f, 1.0f},
+    {0.5f, 0.5f, 0.5f, 1.0f},
+}};
+
+Color halfColor(Color color) {
+  color.r *= 0.5f;
+  color.g *= 0.5f;
+  color.b *= 0.5f;
+  return color;
+}
+
+int percentToTolerance8(double percent) {
+  return std::clamp(static_cast<int>(std::lround(std::clamp(percent, 0.0, 100.0) * 255.0 / 100.0)), 0, 255);
+}
 
 std::string targetEnabledName(int index) {
   return "target" + std::to_string(index) + "Enabled";
@@ -74,6 +99,10 @@ std::string colorSwitchOldName(int index) {
 
 std::string colorSwitchNewName(int index) {
   return "switch" + std::to_string(index) + "New";
+}
+
+std::string thinTargetColorName(int index) {
+  return "thinTarget" + std::to_string(index) + "Color";
 }
 
 Color getColor(OFX::RGBAParam* param, double time) {
@@ -293,7 +322,7 @@ class FsPlugin final : public OFX::ImageEffect {
         break;
       case EffectKind::MainLineRepaint:
         mainColor_ = this->fetchRGBAParam("mainColor");
-        tolerance_ = this->fetchIntParam("tolerance");
+        tolerancePercent_ = this->fetchDoubleParam("tolerance");
         scanLength_ = this->fetchIntParam("scanLength");
         break;
       case EffectKind::SelectColor:
@@ -314,7 +343,7 @@ class FsPlugin final : public OFX::ImageEffect {
       case EffectKind::EdgeLine:
         targetColor_ = this->fetchRGBAParam("targetColor");
         sampleColor_ = this->fetchRGBAParam("sampleColor");
-        tolerance_ = this->fetchIntParam("tolerance");
+        tolerancePercent_ = this->fetchDoubleParam("tolerance");
         length_ = this->fetchIntParam("length");
         drawColor_ = this->fetchRGBAParam("drawColor");
         break;
@@ -325,6 +354,10 @@ class FsPlugin final : public OFX::ImageEffect {
         whiteTransparent_ = this->fetchBooleanParam("whiteTransparent");
         break;
       case EffectKind::LineExtraction:
+        bilateral_ = this->fetchBooleanParam("bilateral");
+        bilateralRadius_ = this->fetchIntParam("bilateralRadius");
+        bilateralSigmaSpatial_ = this->fetchDoubleParam("bilateralSigmaSpatial");
+        bilateralSigmaRange_ = this->fetchDoubleParam("bilateralSigmaRange");
         innerWidth_ = this->fetchIntParam("innerWidth");
         outerWidth_ = this->fetchIntParam("outerWidth");
         drawColor_ = this->fetchRGBAParam("drawColor");
@@ -332,6 +365,17 @@ class FsPlugin final : public OFX::ImageEffect {
         levelLow_ = this->fetchDoubleParam("levelLow");
         levelHigh_ = this->fetchDoubleParam("levelHigh");
         blend_ = this->fetchBooleanParam("blend");
+        break;
+      case EffectKind::Thin:
+        thinTargetColorCount_ = this->fetchChoiceParam("thinTargetColorCount");
+        thinTargetLevel_ = this->fetchDoubleParam("thinTargetLevel");
+        for (int i = 0; i < kTargetCount; ++i) {
+          thinTargetColors_[static_cast<std::size_t>(i)] = this->fetchRGBAParam(thinTargetColorName(i));
+        }
+        thinValue_ = this->fetchIntParam("thinValue");
+        ignoreWhite_ = this->fetchBooleanParam("ignoreWhite");
+        ignoreTransparent_ = this->fetchBooleanParam("ignoreTransparent");
+        refineEdges_ = this->fetchBooleanParam("refineEdges");
         break;
     }
   }
@@ -447,7 +491,7 @@ class FsPlugin final : public OFX::ImageEffect {
       case EffectKind::MainLineRepaint: {
         MainLineRepaintParams params;
         params.mainColor = getColor(mainColor_, time);
-        params.tolerance8 = tolerance_->getValueAtTime(time);
+        params.tolerance8 = percentToTolerance8(tolerancePercent_->getValueAtTime(time));
         params.scanLength = scanLength_->getValueAtTime(time);
         applyMainLineRepaint(input.data(), output.data(), width, height, params);
         break;
@@ -480,7 +524,7 @@ class FsPlugin final : public OFX::ImageEffect {
         EdgeLineParams params;
         params.targetColor = getColor(targetColor_, time);
         params.sampleColor = getColor(sampleColor_, time);
-        params.tolerance8 = tolerance_->getValueAtTime(time);
+        params.tolerance8 = percentToTolerance8(tolerancePercent_->getValueAtTime(time));
         params.length = length_->getValueAtTime(time);
         params.drawColor = getColor(drawColor_, time);
         applyEdgeLine(input.data(), output.data(), width, height, params);
@@ -499,14 +543,34 @@ class FsPlugin final : public OFX::ImageEffect {
       }
       case EffectKind::LineExtraction: {
         LineExtractionParams params;
+        params.bilateral = bilateral_->getValueAtTime(time);
+        params.bilateralRadius = bilateralRadius_->getValueAtTime(time);
+        params.bilateralSigmaSpatial = static_cast<float>(bilateralSigmaSpatial_->getValueAtTime(time));
+        params.bilateralSigmaRange = static_cast<float>(bilateralSigmaRange_->getValueAtTime(time) / 100.0);
         params.innerWidth = innerWidth_->getValueAtTime(time);
         params.outerWidth = outerWidth_->getValueAtTime(time);
         params.color = getColor(drawColor_, time);
         params.postLevel = postLevel_->getValueAtTime(time);
-        params.levelLow = static_cast<float>(levelLow_->getValueAtTime(time));
-        params.levelHigh = static_cast<float>(levelHigh_->getValueAtTime(time));
+        params.levelLow = static_cast<float>(levelLow_->getValueAtTime(time) / 100.0);
+        params.levelHigh = static_cast<float>(levelHigh_->getValueAtTime(time) / 100.0);
         params.blend = blend_->getValueAtTime(time);
         applyLineExtraction(input.data(), output.data(), width, height, params);
+        break;
+      }
+      case EffectKind::Thin: {
+        ThinParams params;
+        int colorCountChoice = 0;
+        thinTargetColorCount_->getValueAtTime(time, colorCountChoice);
+        params.targetColorCount = colorCountChoice + 1;
+        params.targetLevel = static_cast<float>(thinTargetLevel_->getValueAtTime(time));
+        for (int i = 0; i < kTargetCount; ++i) {
+          params.targetColors[static_cast<std::size_t>(i)] = getColor(thinTargetColors_[static_cast<std::size_t>(i)], time);
+        }
+        params.thinValue = thinValue_->getValueAtTime(time);
+        params.ignoreWhite = ignoreWhite_->getValueAtTime(time);
+        params.ignoreTransparent = ignoreTransparent_->getValueAtTime(time);
+        params.refineEdges = refineEdges_->getValueAtTime(time);
+        applyThin(input.data(), output.data(), width, height, params);
         break;
       }
     }
@@ -519,6 +583,7 @@ class FsPlugin final : public OFX::ImageEffect {
   OFX::IntParam* blur_ = nullptr;
   OFX::RGBAParam* mainColor_ = nullptr;
   OFX::IntParam* tolerance_ = nullptr;
+  OFX::DoubleParam* tolerancePercent_ = nullptr;
   OFX::IntParam* scanLength_ = nullptr;
   OFX::BooleanParam* reverse_ = nullptr;
   OFX::BooleanParam* enableAll_ = nullptr;
@@ -531,15 +596,26 @@ class FsPlugin final : public OFX::ImageEffect {
   OFX::IntParam* width_ = nullptr;
   OFX::RGBAParam* customColor_ = nullptr;
   OFX::BooleanParam* whiteTransparent_ = nullptr;
+  OFX::BooleanParam* bilateral_ = nullptr;
+  OFX::IntParam* bilateralRadius_ = nullptr;
+  OFX::DoubleParam* bilateralSigmaSpatial_ = nullptr;
+  OFX::DoubleParam* bilateralSigmaRange_ = nullptr;
   OFX::IntParam* innerWidth_ = nullptr;
   OFX::IntParam* outerWidth_ = nullptr;
   OFX::BooleanParam* postLevel_ = nullptr;
   OFX::DoubleParam* levelLow_ = nullptr;
   OFX::DoubleParam* levelHigh_ = nullptr;
   OFX::BooleanParam* blend_ = nullptr;
+  OFX::ChoiceParam* thinTargetColorCount_ = nullptr;
+  OFX::DoubleParam* thinTargetLevel_ = nullptr;
+  OFX::IntParam* thinValue_ = nullptr;
+  OFX::BooleanParam* ignoreWhite_ = nullptr;
+  OFX::BooleanParam* ignoreTransparent_ = nullptr;
+  OFX::BooleanParam* refineEdges_ = nullptr;
 
   std::array<OFX::BooleanParam*, kTargetCount> targetEnabled_{};
   std::array<OFX::RGBAParam*, kTargetCount> targetColors_{};
+  std::array<OFX::RGBAParam*, kTargetCount> thinTargetColors_{};
   std::array<OFX::BooleanParam*, kColorSwitchCount> switchEnabled_{};
   std::array<OFX::RGBAParam*, kColorSwitchCount> switchOld_{};
   std::array<OFX::RGBAParam*, kColorSwitchCount> switchNew_{};
@@ -554,8 +630,8 @@ void defineParams(OFX::ImageEffectDescriptor& desc, EffectKind kind) {
       break;
     case EffectKind::MainLineRepaint:
       defineColor(desc, *page, "mainColor", "Main Color", {0.0f, 0.0f, 0.0f, 1.0f});
-      defineInt(desc, *page, "tolerance", "Tolerance", 0, 0, 255, 25);
-      defineInt(desc, *page, "scanLength", "Scan Length", 16, 2, 512, 64);
+      defineDouble(desc, *page, "tolerance", "Tolerance (%)", 0.0, 0.0, 100.0);
+      defineInt(desc, *page, "scanLength", "Scan Length", 4, 2, 512, 64);
       break;
     case EffectKind::SelectColor:
       defineTargetColorGroup(desc, *page);
@@ -563,41 +639,62 @@ void defineParams(OFX::ImageEffectDescriptor& desc, EffectKind kind) {
       defineInt(desc, *page, "tolerance", "Tolerance", 0, 0, 255, 15);
       break;
     case EffectKind::ColorSwitch: {
-      defineBool(desc, *page, "enableAll", "Enable All", true);
-      defineInt(desc, *page, "activeCount", "Active Param Count", 8, 0, kColorSwitchCount, kColorSwitchCount);
+      defineBool(desc, *page, "enableAll", "Enable All", false);
+      defineInt(desc, *page, "activeCount", "Active Param Count", 4, 1, kColorSwitchCount, kColorSwitchCount);
       defineChoice(desc, *page, "mode", "Mode", 0, {"Replace", "Key", "Extract"});
       OFX::GroupParamDescriptor* group = desc.defineGroupParam("colors");
       group->setLabels("Colors", "Colors", "Colors");
       page->addChild(*group);
       for (int i = 0; i < kColorSwitchCount; ++i) {
+        const Color oldColor = kColorSwitchBaseColors[static_cast<std::size_t>(i % kTargetCount)];
         defineBool(desc, *page, colorSwitchEnabledName(i), "Switch " + std::to_string(i) + " On", false, group);
-        defineColor(desc, *page, colorSwitchOldName(i), "Switch " + std::to_string(i) + " Old", {0.0f, 0.0f, 0.0f, 1.0f}, group);
-        defineColor(desc, *page, colorSwitchNewName(i), "Switch " + std::to_string(i) + " New", {1.0f, 1.0f, 1.0f, 1.0f}, group);
+        defineColor(desc, *page, colorSwitchOldName(i), "Switch " + std::to_string(i) + " Old", oldColor, group);
+        defineColor(desc, *page, colorSwitchNewName(i), "Switch " + std::to_string(i) + " New", halfColor(oldColor), group);
       }
       break;
     }
     case EffectKind::EdgeLine:
       defineColor(desc, *page, "targetColor", "Target Color", {1.0f, 0.0f, 0.0f, 1.0f});
       defineColor(desc, *page, "sampleColor", "Sample Color", {0.0f, 1.0f, 0.0f, 1.0f});
-      defineInt(desc, *page, "tolerance", "Tolerance", 0, 0, 255, 25);
+      defineDouble(desc, *page, "tolerance", "Tolerance (%)", 0.0, 0.0, 100.0);
       defineInt(desc, *page, "length", "Length", 10, 0, 200, 20);
       defineColor(desc, *page, "drawColor", "Draw Color", {0.0f, 0.0f, 1.0f, 1.0f});
       break;
     case EffectKind::RimFill:
-      defineInt(desc, *page, "width", "Width", 1, 0, 200, 20);
+      defineInt(desc, *page, "width", "Width", 0, 0, 200, 10);
       defineChoice(desc, *page, "mode", "Fill Method", 0, {"CustomColor", "AdjacentColor"});
-      defineColor(desc, *page, "customColor", "Custom Color", {1.0f, 1.0f, 1.0f, 1.0f});
-      defineBool(desc, *page, "whiteTransparent", "Treat White as Transparent", false);
+      defineColor(desc, *page, "customColor", "Custom Color", {0.0f, 0.0f, 0.0f, 1.0f});
+      defineBool(desc, *page, "whiteTransparent", "Treat White as Transparent", true);
       break;
     case EffectKind::LineExtraction:
-      defineInt(desc, *page, "outerWidth", "Outer Sampling", 3, 1, 64, 16);
-      defineInt(desc, *page, "innerWidth", "Inner Sampling", 1, 0, 63, 8);
-      defineColor(desc, *page, "drawColor", "Color", {0.0f, 0.0f, 0.0f, 1.0f});
-      defineBool(desc, *page, "postLevel", "Post Level", false);
-      defineDouble(desc, *page, "levelLow", "Level Low", 0.0, 0.0, 1.0);
-      defineDouble(desc, *page, "levelHigh", "Level High", 1.0, 0.0, 1.0);
+      defineBool(desc, *page, "bilateral", "Bilateral", true);
+      defineInt(desc, *page, "bilateralRadius", "Radius", 2, 1, 10, 10);
+      defineDouble(desc, *page, "bilateralSigmaSpatial", "Sigma Spatial", 1.0, 0.01, 20.0);
+      defineDouble(desc, *page, "bilateralSigmaRange", "Sigma Range", 15.0, 0.1, 100.0);
+      defineInt(desc, *page, "outerWidth", "Outer Sampling", 1, 0, 100, 100);
+      defineInt(desc, *page, "innerWidth", "Inner Sampling", 1, 0, 100, 100);
+      defineColor(desc, *page, "drawColor", "Color", {1.0f, 1.0f, 1.0f, 1.0f});
+      defineBool(desc, *page, "postLevel", "Post Level", true);
+      defineDouble(desc, *page, "levelLow", "Level Low", 5.0, 0.0, 100.0);
+      defineDouble(desc, *page, "levelHigh", "Level High", 90.0, 0.0, 100.0);
       defineBool(desc, *page, "blend", "Blend with Original", false);
       break;
+    case EffectKind::Thin: {
+      defineChoice(desc, *page, "thinTargetColorCount", "Inking Color Count", 0, {"1", "2", "3", "4", "5", "6", "7", "8"});
+      defineDouble(desc, *page, "thinTargetLevel", "Range", 0.0, 0.0, 10.0);
+      OFX::GroupParamDescriptor* group = desc.defineGroupParam("thinTargetColors");
+      group->setLabels("Inking Lines", "Inking Lines", "Inking Lines");
+      page->addChild(*group);
+      for (int i = 0; i < kTargetCount; ++i) {
+        const float v = static_cast<float>(i * 30) / 255.0f;
+        defineColor(desc, *page, thinTargetColorName(i), "Target" + std::to_string(i + 1), {v, v, v, 1.0f}, group);
+      }
+      defineInt(desc, *page, "thinValue", "ThinValue", 0, 0, 20, 10);
+      defineBool(desc, *page, "ignoreWhite", "Ignore White", false);
+      defineBool(desc, *page, "ignoreTransparent", "Ignore Transparent", false);
+      defineBool(desc, *page, "refineEdges", "Refine Edges", false);
+      break;
+    }
   }
 }
 
@@ -617,6 +714,8 @@ template <>
 struct SpecForKind<EffectKind::RimFill> { static constexpr EffectSpec spec = kRimFill; };
 template <>
 struct SpecForKind<EffectKind::LineExtraction> { static constexpr EffectSpec spec = kLineExtraction; };
+template <>
+struct SpecForKind<EffectKind::Thin> { static constexpr EffectSpec spec = kThin; };
 
 template <EffectKind Kind>
 class FsFactory final : public OFX::PluginFactoryHelper<FsFactory<Kind>> {
@@ -653,6 +752,7 @@ void getPluginIDs(PluginFactoryArray& ids) {
   static FsFactory<EffectKind::EdgeLine> edgeLineFactory;
   static FsFactory<EffectKind::RimFill> rimFillFactory;
   static FsFactory<EffectKind::LineExtraction> lineExtractionFactory;
+  static FsFactory<EffectKind::Thin> thinFactory;
 
   ids.push_back(&selectiveColorBlurFactory);
   ids.push_back(&mainLineRepaintFactory);
@@ -661,6 +761,7 @@ void getPluginIDs(PluginFactoryArray& ids) {
   ids.push_back(&edgeLineFactory);
   ids.push_back(&rimFillFactory);
   ids.push_back(&lineExtractionFactory);
+  ids.push_back(&thinFactory);
 }
 
 }  // namespace Plugin

@@ -18,7 +18,8 @@ F's Plugins OFX
 - `FS-SelectiveColorBlur`: NF version
 - `FS-ColorSwitch`: NF version
 - `FS-RimFill`: NF version
-- `FS-LineExtraction`: NF version, first-pass CPU port
+- `FS-LineExtraction`: NF version, including bilateral pre-processing
+- `FS-Thin`: NF version, including the NF pattern thinning passes
 - `FS-MainLineRepaint`: Legacy version, because no newer NF project was found
 - `FS-SelectColor`: Legacy version, because no newer NF project was found
 - `FS-EdgeLine`: Legacy version, because no newer NF project was found
@@ -52,13 +53,17 @@ Original F's Plugins / NF-Plugins by bry-ful
 - The NF version is used wherever it exists in the source repository.
 - Matching-sensitive effects preserve the original exact or 8-bit tolerance
   style, so color management shifts can affect results.
+- `FS-LineExtraction` includes the original NF-style optional bilateral
+  pre-processing controls before line sampling: `Bilateral`, `Radius`,
+  `Sigma Spatial`, and `Sigma Range`. `Sigma Range` and the post-level controls
+  use the same 0-100 UI scale as the After Effects version, then convert to
+  normalized values internally. `Outer Sampling` and `Inner Sampling` also use
+  a 0-100 UI range.
+- `FS-Thin` uses the NF-style UI ranges and target color matching, and ports the
+  NF pattern thinning passes for OFX hosts.
 - Icon assets are kept under `assets/` as optional artwork, but the bundle does
   not currently advertise an icon because host support was inconsistent.
 - All effects support RGBA 8-bit, 16-bit, and float OFX images.
-
-`LineExtraction` is ported as a practical first pass around the NF sampling
-parameters. Its optional bilateral pre-process from the AE version is not yet
-implemented in this OFX build.
 
 ## Install
 

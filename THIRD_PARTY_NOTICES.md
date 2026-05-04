@@ -6,6 +6,7 @@ This OpenFX port adapts algorithms and default parameters from:
 - F's PluginsProjects / NF-ColorSwitch
 - F's PluginsProjects / NF-RimFill
 - F's PluginsProjects / NF-LineExtraction
+- F's PluginsProjects / NF-Thin
 - F's PluginsProjects / F's MainLineRepaint
 - F's PluginsProjects / F's SelectColor
 - F's PluginsProjects / F's EdgeLine

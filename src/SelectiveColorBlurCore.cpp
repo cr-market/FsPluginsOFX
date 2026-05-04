@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <utility>
 
 namespace selective_color_blur {
 namespace {
@@ -255,6 +257,66 @@ bool matchesColor(const PixelF& pixel, const Color& color, int tolerance8) {
 
 float luminance(const PixelF& pixel) {
   return 0.29891f * pixel.r + 0.58661f * pixel.g + 0.11448f * pixel.b;
+}
+
+void applyBilateral(const PixelF* src, PixelF* dst, int width, int height, int radius, float sigmaSpatial, float sigmaRange) {
+  radius = std::clamp(radius, 1, 10);
+  sigmaSpatial = std::max(0.01f, sigmaSpatial);
+  sigmaRange = std::clamp(sigmaRange, 0.0f, 1.0f);
+
+  const int kernelSize = radius * 2 + 1;
+  std::vector<float> spatial(static_cast<std::size_t>(kernelSize * kernelSize), 0.0f);
+  const float spatialDivisor = 2.0f * sigmaSpatial * sigmaSpatial + 0.00001f;
+  for (int ky = -radius; ky <= radius; ++ky) {
+    for (int kx = -radius; kx <= radius; ++kx) {
+      spatial[static_cast<std::size_t>((ky + radius) * kernelSize + (kx + radius))] =
+          std::exp(-static_cast<float>(kx * kx + ky * ky) / spatialDivisor);
+    }
+  }
+
+  float rangeDivisor = 2.0f * sigmaRange * sigmaRange;
+  if (rangeDivisor < 0.00001f) {
+    rangeDivisor = 0.00001f;
+  }
+
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      const PixelF& center = src[static_cast<std::size_t>(y) * width + x];
+      const float centerLuma = luminance(center);
+      float sumR = 0.0f;
+      float sumG = 0.0f;
+      float sumB = 0.0f;
+      float sumW = 0.0f;
+
+      for (int ky = -radius; ky <= radius; ++ky) {
+        const int sy = std::clamp(y + ky, 0, height - 1);
+        for (int kx = -radius; kx <= radius; ++kx) {
+          const int sx = std::clamp(x + kx, 0, width - 1);
+          const PixelF& p = src[static_cast<std::size_t>(sy) * width + sx];
+          const float lumaDiff = centerLuma - luminance(p);
+          float weight = spatial[static_cast<std::size_t>((ky + radius) * kernelSize + (kx + radius))];
+          weight *= std::exp(-(lumaDiff * lumaDiff) / rangeDivisor);
+          sumR += p.r * weight;
+          sumG += p.g * weight;
+          sumB += p.b * weight;
+          sumW += weight;
+        }
+      }
+
+      PixelF& out = dst[static_cast<std::size_t>(y) * width + x];
+      if (sumW > 0.0f) {
+        const float invW = 1.0f / sumW;
+        out.r = sumR * invW;
+        out.g = sumG * invW;
+        out.b = sumB * invW;
+      } else {
+        out.r = center.r;
+        out.g = center.g;
+        out.b = center.b;
+      }
+      out.a = center.a;
+    }
+  }
 }
 
 void apply(const PixelF* src, PixelF* dst, int width, int height, const Parameters& params) {
@@ -527,10 +589,17 @@ void applyLineExtraction(const PixelF* src, PixelF* dst, int width, int height, 
   }
   const int inner = std::max(0, params.innerWidth);
   const int outer = std::max(inner + 1, params.outerWidth);
+  std::vector<PixelF> filtered;
+  const PixelF* lineSrc = src;
+  if (params.bilateral) {
+    filtered.resize(static_cast<std::size_t>(width) * height);
+    applyBilateral(src, filtered.data(), width, height, params.bilateralRadius, params.bilateralSigmaSpatial, params.bilateralSigmaRange);
+    lineSrc = filtered.data();
+  }
   auto sampleLum = [&](int x, int y) {
     x = std::clamp(x, 0, width - 1);
     y = std::clamp(y, 0, height - 1);
-    return luminance(src[static_cast<std::size_t>(y) * width + x]);
+    return luminance(lineSrc[static_cast<std::size_t>(y) * width + x]);
   };
 
   for (int y = 0; y < height; ++y) {
@@ -570,6 +639,175 @@ void applyLineExtraction(const PixelF* src, PixelF* dst, int width, int height, 
       }
       dst[static_cast<std::size_t>(y) * width + x] = line;
     }
+  }
+}
+
+struct ThinPixel8 {
+  int alpha = 0;
+  int red = 0;
+  int green = 0;
+  int blue = 0;
+};
+
+struct ThinPixel16 {
+  int alpha = 0;
+  int red = 0;
+  int green = 0;
+  int blue = 0;
+};
+
+struct ThinPixel {
+  float alpha = 0.0f;
+  float red = 0.0f;
+  float green = 0.0f;
+  float blue = 0.0f;
+};
+
+struct ThinInfo;
+struct ThinBak {
+  bool drawFlag = false;
+  ThinPixel color;
+  int dir = -1;
+};
+
+struct ThinInfo {
+  int w = 0;
+  int wt = 0;
+  int wt2 = 0;
+  int h = 0;
+  std::vector<ThinPixel> scanline;
+  ThinPixel* data = nullptr;
+  bool white = false;
+  bool alphaZero = false;
+  bool edge = false;
+  int target_color_count = 0;
+  ThinPixel8 color8[8];
+  int level = 0;
+  int nowX = 0;
+  int nowY = 0;
+};
+
+template <typename PixelType>
+struct PixelTraits;
+
+template <>
+struct PixelTraits<ThinPixel> {
+  using InfoType = ThinInfo;
+  using BakType = ThinBak;
+
+  static ThinPixel ConvertFrom8bit(const ThinPixel8& p) {
+    return {static_cast<float>(p.alpha) / 255.0f,
+            static_cast<float>(p.red) / 255.0f,
+            static_cast<float>(p.green) / 255.0f,
+            static_cast<float>(p.blue) / 255.0f};
+  }
+
+  static ThinPixel8 ConvertTo8bit(const ThinPixel& p) {
+    return {quantize8(p.alpha), quantize8(p.red), quantize8(p.green), quantize8(p.blue)};
+  }
+};
+
+#include "ThinPattern.inc"
+
+ThinPixel toThinPixel(const PixelF& pixel) {
+  return {pixel.a, pixel.r, pixel.g, pixel.b};
+}
+
+PixelF fromThinPixel(const ThinPixel& pixel) {
+  return {pixel.red, pixel.green, pixel.blue, pixel.alpha};
+}
+
+ThinPixel8 toThinTarget(const Color& color) {
+  return {quantize8(color.a), quantize8(color.r), quantize8(color.g), quantize8(color.b)};
+}
+
+void runThinPass(ThinInfo& ti, ThinBak (*pattern)(ThinInfo*)) {
+  int now = 0;
+  for (int y = 0; y < ti.h; ++y) {
+    ti.nowY = y;
+    scanlineCopy<ThinPixel>(&ti, y);
+    for (int x = 0; x < ti.w; ++x) {
+      ti.nowX = x;
+      ThinPixel p = getScanLine<ThinPixel>(&ti, 0, 0);
+      if (CompPx<ThinPixel>(&ti, p)) {
+        ThinBak tb = pattern(&ti);
+        if (tb.drawFlag && !shouldSkipPixel<ThinPixel>(&ti, tb.color)) {
+          ti.data[now] = tb.color;
+        }
+      }
+      ++now;
+    }
+  }
+}
+
+void applyThin(const PixelF* src, PixelF* dst, int width, int height, const ThinParams& params) {
+  if (!src || !dst || width <= 0 || height <= 0) {
+    return;
+  }
+  std::copy(src, src + static_cast<std::size_t>(width) * height, dst);
+  const int iterations = std::clamp(params.thinValue, 0, 20);
+  if (iterations <= 0 || params.targetColorCount <= 0) {
+    return;
+  }
+
+  std::vector<ThinPixel> data(static_cast<std::size_t>(width) * height);
+  for (std::size_t i = 0; i < data.size(); ++i) {
+    data[i] = toThinPixel(src[i]);
+  }
+
+  ThinInfo ti;
+  ti.target_color_count = std::clamp(params.targetColorCount, 0, 8);
+  for (int i = 0; i < ti.target_color_count; ++i) {
+    ti.color8[i] = toThinTarget(params.targetColors[static_cast<std::size_t>(i)]);
+  }
+  ti.level = std::clamp(static_cast<int>(std::lround(params.targetLevel * 255.0f)), 0, 255);
+  ti.w = width;
+  ti.wt = width;
+  ti.wt2 = width * 2;
+  ti.h = height;
+  ti.data = data.data();
+  ti.white = params.ignoreWhite;
+  ti.alphaZero = params.ignoreTransparent;
+  ti.edge = params.refineEdges;
+  ti.scanline.resize(static_cast<std::size_t>(width) * 3U);
+
+  for (int pass = 0; pass < iterations; ++pass) {
+    if (ti.edge) {
+      runThinPass(ti, getPatEdge<ThinPixel>);
+    }
+    runThinPass(ti, getPat<ThinPixel>);
+    runThinPass(ti, getPatDot<ThinPixel>);
+
+    int now = 0;
+    for (int y = 0; y < ti.h; ++y) {
+      ti.nowY = y;
+      scanlineCopy<ThinPixel>(&ti, y);
+      for (int x = 0; x < ti.w; ++x) {
+        ti.nowX = x;
+        int targetIndex = now;
+        ThinPixel p = getScanLine<ThinPixel>(&ti, 0, 0);
+        if (CompPx<ThinPixel>(&ti, p)) {
+          ThinBak tb = getPatDot2nd<ThinPixel>(&ti);
+          if (tb.drawFlag) {
+            switch (tb.dir) {
+              case 0: tb.drawFlag = ti.nowY > 0; targetIndex = now - ti.wt; break;
+              case 1: tb.drawFlag = ti.nowX < (ti.w - 1); targetIndex = now + 1; break;
+              case 2: tb.drawFlag = ti.nowY < (ti.h - 1); targetIndex = now + ti.wt; break;
+              case 3: tb.drawFlag = ti.nowX > 0; targetIndex = now - 1; break;
+              default: tb.drawFlag = false; break;
+            }
+          }
+          if (tb.drawFlag && !shouldSkipPixel<ThinPixel>(&ti, ti.data[targetIndex])) {
+            ti.data[targetIndex] = tb.color;
+          }
+        }
+        ++now;
+      }
+    }
+  }
+
+  for (std::size_t i = 0; i < data.size(); ++i) {
+    dst[i] = fromThinPixel(data[i]);
   }
 }
 

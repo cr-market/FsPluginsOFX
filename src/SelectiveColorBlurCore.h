@@ -92,13 +92,27 @@ struct MainLineRepaintParams {
 };
 
 struct LineExtractionParams {
+  bool bilateral = true;
+  int bilateralRadius = 2;
+  float bilateralSigmaSpatial = 1.0f;
+  float bilateralSigmaRange = 0.15f;
   int innerWidth = 1;
-  int outerWidth = 3;
-  Color color {0.0f, 0.0f, 0.0f, 1.0f};
-  bool postLevel = false;
-  float levelLow = 0.0f;
-  float levelHigh = 1.0f;
+  int outerWidth = 1;
+  Color color {1.0f, 1.0f, 1.0f, 1.0f};
+  bool postLevel = true;
+  float levelLow = 0.05f;
+  float levelHigh = 0.9f;
   bool blend = false;
+};
+
+struct ThinParams {
+  int targetColorCount = 1;
+  float targetLevel = 0.0f;
+  std::array<Color, 8> targetColors;
+  int thinValue = 0;
+  bool ignoreWhite = false;
+  bool ignoreTransparent = false;
+  bool refineEdges = false;
 };
 
 void applySelectColor(const PixelF* src, PixelF* dst, int width, int height, const SelectColorParams& params);
@@ -107,5 +121,6 @@ void applyEdgeLine(const PixelF* src, PixelF* dst, int width, int height, const 
 void applyRimFill(const PixelF* src, PixelF* dst, int width, int height, const RimFillParams& params);
 void applyMainLineRepaint(const PixelF* src, PixelF* dst, int width, int height, const MainLineRepaintParams& params);
 void applyLineExtraction(const PixelF* src, PixelF* dst, int width, int height, const LineExtractionParams& params);
+void applyThin(const PixelF* src, PixelF* dst, int width, int height, const ThinParams& params);
 
 }  // namespace selective_color_blur

@@ -90,5 +90,35 @@ int main() {
   line.color = {0.0f, 0.0f, 0.0f, 1.0f};
   selective_color_blur::applyLineExtraction(src.data(), dst.data(), 3, 2, line);
   assert(dst[0].a >= 0.0f && dst[0].a <= 1.0f);
+
+  std::vector<PixelF> noisy = {
+      {0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f},
+  };
+  selective_color_blur::LineExtractionParams noBilateral;
+  noBilateral.bilateral = false;
+  noBilateral.innerWidth = 0;
+  noBilateral.outerWidth = 1;
+  selective_color_blur::LineExtractionParams withBilateral = noBilateral;
+  withBilateral.bilateral = true;
+  withBilateral.bilateralRadius = 1;
+  withBilateral.bilateralSigmaSpatial = 4.0f;
+  withBilateral.bilateralSigmaRange = 1.0f;
+  selective_color_blur::applyLineExtraction(noisy.data(), dst.data(), 3, 1, noBilateral);
+  const float rawAlpha0 = dst[0].a;
+  const float rawAlpha1 = dst[1].a;
+  const float rawAlpha2 = dst[2].a;
+  selective_color_blur::applyLineExtraction(noisy.data(), dst.data(), 3, 1, withBilateral);
+  const float diff = std::abs(dst[0].a - rawAlpha0) + std::abs(dst[1].a - rawAlpha1) + std::abs(dst[2].a - rawAlpha2);
+  assert(diff > 0.0001f);
+
+  std::vector<PixelF> thinSrc = {
+      {0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f},
+  };
+  selective_color_blur::ThinParams thin;
+  thin.targetColorCount = 1;
+  thin.targetColors[0] = {0.0f, 0.0f, 0.0f, 1.0f};
+  thin.thinValue = 1;
+  selective_color_blur::applyThin(thinSrc.data(), dst.data(), 3, 1, thin);
+  assert(dst[1].r > 0.5f);
   return 0;
 }
